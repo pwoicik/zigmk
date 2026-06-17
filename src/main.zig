@@ -14,6 +14,16 @@ comptime {
     _ = microzig.export_startup();
 }
 
+pub const microzig_options: microzig.Options = .{
+    .interrupts = .{
+        .PIO0_IRQ_0 = .{ .c = interrupt_handler },
+    },
+};
+
+fn interrupt_handler() callconv(.c) void {
+    pins.led.put(1);
+}
+
 pub const Modifiers = packed struct(u8) {
     lctrl: bool,
     lshift: bool,
@@ -124,8 +134,8 @@ const Pins = struct {
         _ = microzig.board.pin_config.apply();
         self.led.set_direction(.out);
 
-        self.serial.clk.set_function(.sio);
-        self.serial.data.set_function(.sio);
+        self.serial.p0.set_function(.sio);
+        self.serial.p1.set_function(.sio);
 
         for (self.rows) |pin| {
             pin.set_function(.sio);
@@ -141,51 +151,51 @@ const Pins = struct {
 };
 
 const SerialPins = struct {
-    clk: hal.gpio.Pin,
-    data: hal.gpio.Pin,
+    p0: gpio.Pin,
+    p1: gpio.Pin,
 };
 
 const pins = if (config.board == .pico2)
     Pins{
         .rows = .{
-            hal.gpio.num(6),
-            hal.gpio.num(7),
-            hal.gpio.num(8),
-            hal.gpio.num(9),
+            gpio.num(6),
+            gpio.num(7),
+            gpio.num(8),
+            gpio.num(9),
         },
         .cols = .{
-            hal.gpio.num(15),
-            hal.gpio.num(11),
-            hal.gpio.num(12),
-            hal.gpio.num(13),
-            hal.gpio.num(14),
+            gpio.num(15),
+            gpio.num(11),
+            gpio.num(12),
+            gpio.num(13),
+            gpio.num(14),
         },
         .serial = .{
-            .clk = hal.gpio.num(16),
-            .data = hal.gpio.num(17),
+            .p0 = gpio.num(16),
+            .p1 = gpio.num(17),
         },
-        .led = hal.gpio.num(25),
+        .led = gpio.num(25),
     }
 else
     Pins{
         .rows = .{
-            hal.gpio.num(26),
-            hal.gpio.num(27),
-            hal.gpio.num(28),
-            hal.gpio.num(29),
+            gpio.num(26),
+            gpio.num(27),
+            gpio.num(28),
+            gpio.num(29),
         },
         .cols = .{
-            hal.gpio.num(6),
-            hal.gpio.num(7),
-            hal.gpio.num(3),
-            hal.gpio.num(4),
-            hal.gpio.num(2),
+            gpio.num(6),
+            gpio.num(7),
+            gpio.num(3),
+            gpio.num(4),
+            gpio.num(2),
         },
         .serial = .{
-            .clk = hal.gpio.num(16),
-            .data = hal.gpio.num(17),
+            .p0 = gpio.num(0),
+            .p1 = gpio.num(1),
         },
-        .led = hal.gpio.num(25),
+        .led = gpio.num(25),
     };
 
 const MATRIX = [_]Code{
@@ -243,6 +253,7 @@ fn detectMaster() bool {
 
 pub fn main() !void {
     pins.init();
+    _ = PioUart.init(.{ .rx = gpio.num(0), .tx = gpio.num(1) });
 
     var usb_ctrl = usb.DeviceController(
         .{
@@ -352,16 +363,10 @@ pub fn main() !void {
 }
 
 const Link = struct {
-    /// Half clock period, in microseconds. 5 µs -> ~100 kHz bit rate, which is
-    /// far more than enough for a keyboard matrix and tolerates noisy TRRS wiring.
-    /// Lower this if you want a faster scan.
-    const HALF_PERIOD_US: u32 = 3;
+    const HALF_PERIOD_US: u32 = 4;
 
-    /// Maximum time (in microseconds) the master will wait for the slave to
-    /// produce a frame before giving up and returning a timeout error.
     const FRAME_TIMEOUT_US: u32 = 2_000;
 
-    // 1 start + matrix + 8 crc + 1 stop
     const FRAME_BITS: usize = 1 + matrix_half_s + 8 + 1;
 
     pub const Matrix = [matrix_arr_half_len]u8;
@@ -387,8 +392,6 @@ const Link = struct {
         if (value == 1) m[idx / 8] |= mask else m[idx / 8] &= ~mask;
     }
 
-    // ---- CRC-8 (poly 0x07, init 0x00) over the matrix bytes ------------
-
     fn crc8(bytes: []const u8) u8 {
         var crc: u8 = 0;
         for (bytes) |b| {
@@ -397,56 +400,40 @@ const Link = struct {
             while (i < 7) : (i += 1) {
                 crc = if ((crc & 0x80) != 0) (crc << 1) ^ 0x07 else crc << 1;
             }
-            // last iteration unrolled to avoid u3 overflow
             crc = if ((crc & 0x80) != 0) (crc << 1) ^ 0x07 else crc << 1;
         }
         return crc;
     }
 
-    // =====================================================================
-    // Master side
-    // =====================================================================
-
     pub const Master = struct {
-        clk: gpio.Pin = pins.serial.clk,
-        data: gpio.Pin = pins.serial.clk,
+        clk: gpio.Pin = pins.serial.p0,
+        data: gpio.Pin = pins.serial.p0,
 
         pub fn init() void {
-            pins.serial.clk.set_function(.sio);
-            pins.serial.data.set_function(.sio);
+            pins.serial.p0.set_function(.sio);
+            pins.serial.p1.set_function(.sio);
 
-            // CLK: master output, start low
-            pins.serial.clk.put(0);
-            pins.serial.clk.set_direction(.out);
+            pins.serial.p0.put(0);
+            pins.serial.p0.set_direction(.out);
 
-            // DATA: master input with pull-down so a missing/unpowered
-            // slave reads as all-zeros instead of floating.
-            pins.serial.data.set_direction(.in);
-            pins.serial.data.set_pull(.down);
+            pins.serial.p1.set_direction(.in);
+            pins.serial.p1.set_pull(.down);
         }
 
         inline fn half_period() void {
             time.sleep_us(HALF_PERIOD_US);
         }
 
-        /// Clock out one bit period and return the bit the slave drove.
-        /// Slave updates DATA on rising edge; master samples just before
-        /// the falling edge.
         inline fn clock_one_bit() u1 {
-            pins.serial.clk.put(1);
+            pins.serial.p0.put(1);
             half_period();
-            const bit = pins.serial.data.read();
-            pins.serial.clk.put(0);
+            const bit = pins.serial.p1.read();
+            pins.serial.p0.put(0);
             half_period();
             return bit;
         }
 
-        /// Run a full transaction: clock out an entire frame, validate
-        /// it, and write the matrix bytes into `out`.
         pub fn read_matrix(out: *[matrix_arr_half_len]u8) Error!void {
-            // Wait (with timeout) for the slave to assert the start bit.
-            // The slave pulls DATA high after seeing the first rising
-            // edge. We retry up to FRAME_TIMEOUT_US worth of clocks.
             const max_start_attempts: u32 =
                 FRAME_TIMEOUT_US / (2 * HALF_PERIOD_US) + 1;
 
@@ -458,8 +445,6 @@ const Link = struct {
             }
             if (start_bit != 1) return Error.Timeout;
 
-            // Matrix payload, MSB first.
-            @memset(out, 0);
             var i: usize = 0;
             while (i < matrix_half_s) : (i += 1) {
                 const bit = clock_one_bit();
@@ -467,7 +452,6 @@ const Link = struct {
                 out[i / 8] |= @as(u8, bit) << shift;
             }
 
-            // CRC-8 (MSB first).
             var rx_crc: u8 = 0;
             var j: u4 = 0;
             while (j < 8) : (j += 1) {
@@ -475,7 +459,6 @@ const Link = struct {
                 rx_crc = (rx_crc << 1) | @as(u8, bit);
             }
 
-            // Stop bit must be 0.
             const stop = clock_one_bit();
             if (stop != 0) return Error.BadStopBit;
 
@@ -483,52 +466,38 @@ const Link = struct {
         }
     };
 
-    // =====================================================================
-    // Slave side
-    // =====================================================================
-
     pub const Slave = struct {
-        clk: gpio.Pin = pins.serial.clk,
-        data: gpio.Pin = pins.serial.data,
+        clk: gpio.Pin = pins.serial.p0,
+        data: gpio.Pin = pins.serial.p1,
 
         pub fn init() void {
-            pins.serial.clk.set_function(.sio);
-            pins.serial.data.set_function(.sio);
+            pins.serial.p0.set_function(.sio);
+            pins.serial.p1.set_function(.sio);
 
-            // CLK: slave input. Pull-down so an unconnected master reads
-            // as idle instead of floating.
-            pins.serial.clk.set_direction(.in);
-            pins.serial.clk.set_pull(.down);
+            pins.serial.p0.set_direction(.in);
+            pins.serial.p0.set_pull(.down);
 
-            // DATA: slave output, start low (idle).
-            pins.serial.data.put(0);
-            pins.serial.data.set_direction(.out);
+            pins.serial.p1.put(0);
+            pins.serial.p1.set_direction(.out);
         }
 
         inline fn wait_clk_high() void {
-            while (pins.serial.clk.read() == 0) {}
+            while (pins.serial.p0.read() == 0) {}
         }
 
         inline fn wait_clk_low() void {
-            while (pins.serial.clk.read() == 1) {}
+            while (pins.serial.p0.read() == 1) {}
         }
 
-        /// Drive `bit` on DATA on the rising edge of CLK, hold it through
-        /// the full clock period.
         inline fn shift_one_bit(bit: u1) void {
             wait_clk_high();
-            pins.serial.data.put(bit);
+            pins.serial.p1.put(bit);
             wait_clk_low();
         }
 
-        /// Send the matrix to the master. Blocks until the master drives
-        /// a full frame's worth of clocks. Call this in your main loop
-        /// after every matrix scan.
         pub fn send_matrix(m: *const [matrix_arr_half_len]u8) void {
-            // Start bit
             shift_one_bit(1);
 
-            // Matrix payload, MSB first
             var i: usize = 0;
             while (i < matrix_half_s) : (i += 1) {
                 const shift: u3 = @intCast(7 - (i % 8));
@@ -536,7 +505,6 @@ const Link = struct {
                 shift_one_bit(bit);
             }
 
-            // CRC-8
             const crc = crc8(m[0..]);
             var j: i32 = 7;
             while (j >= 0) : (j -= 1) {
@@ -544,8 +512,138 @@ const Link = struct {
                 shift_one_bit(bit);
             }
 
-            // Stop bit
             shift_one_bit(0);
         }
+    };
+};
+
+const PioUart = struct {
+    const BAUD = 115_200;
+
+    const Lane = struct {
+        pio: hal.pio.Pio,
+        sm: hal.pio.StateMachine,
+    };
+
+    rx: Lane,
+    tx: Lane,
+
+    fn init(_pins: struct { rx: gpio.Pin, tx: gpio.Pin }) PioUart {
+        const self = PioUart{
+            .rx = .{ .pio = .pio0, .sm = .sm0 },
+            .tx = .{ .pio = .pio0, .sm = .sm1 },
+        };
+        const div = hal.pio.ClkDivOptions.from_float(
+            @as(f32, @floatFromInt(hal.clock_config.sys.?.frequency())) / (8 * BAUD),
+        );
+        __initRx(_pins.rx, self.rx, div) catch unreachable;
+        __initTx(_pins.tx, self.tx, div) catch unreachable;
+        return self;
+    }
+
+    inline fn write(self: *const PioUart, value: u8) void {
+        self.tx.pio.sm_blocking_write(self.tx.sm, value);
+    }
+
+    inline fn read(self: *const PioUart) u8 {
+        const value = @as([*]volatile u8, @ptrCast(self.rx.pio.sm_get_rx_fifo(self.rx.sm))) + 3;
+        while (self.rx.pio.sm_is_rx_fifo_empty(self.rx.sm)) {}
+        return @as(*volatile u8, @ptrCast(value)).*;
+    }
+
+    fn __initRx(pin: gpio.Pin, lane: Lane, div: hal.pio.ClkDivOptions) !void {
+        const pio = lane.pio;
+        const sm = lane.sm;
+
+        try pio.sm_set_pindir(sm, pin, 1, .in);
+        pio.gpio_init(pin);
+        pin.set_pull(.up);
+
+        pio.sm_load_and_start_program(
+            sm,
+            rx_prog,
+            .{
+                .clkdiv = div,
+                .shift = .{
+                    .in_shiftdir = .right,
+                    .autopush = false,
+                    .push_threshold = 0,
+                    .join_rx = true,
+                },
+                .pin_mappings = .{
+                    .in_base = pin,
+                },
+                .exec = .{
+                    .jmp_pin = pin,
+                },
+            },
+        ) catch unreachable;
+        pio.sm_set_enabled(sm, true);
+        pio.sm_enable_interrupt(sm, .irq0, .rx_not_empty);
+    }
+
+    const rx_prog = blk: {
+        @setEvalBranchQuota(10_000);
+        break :blk hal.pio.assemble(
+            \\ .program uart_rx
+            \\ start:
+            \\     wait 0 pin 0        ; Stall until start bit is asserted
+            \\     set x, 7    [10]    ; Preload bit counter, then delay until halfway through
+            \\ bitloop:                ; the first data bit (12 cycles incl wait, set).
+            \\     in pins, 1          ; Shift data bit into ISR
+            \\     jmp x-- bitloop [6] ; Loop 8 times, each loop iteration is 8 cycles
+            \\     jmp pin good_stop   ; Check stop bit (should be high)
+            \\
+            \\     irq wait 0          ; Either a framing error or a break. Set a sticky flag,
+            \\     wait 1 pin 0        ; and wait for line to return to idle state.
+            \\     jmp start           ; Don't push data if we didn't see good framing.
+            \\
+            \\ good_stop:              ; No delay before returning to start; a little slack is
+            \\     push                ; important in case the TX clock is slightly too fast.
+        , .{}).get_program_by_name("uart_rx");
+    };
+
+    fn __initTx(pin: gpio.Pin, lane: Lane, div: hal.pio.ClkDivOptions) !void {
+        const pio = lane.pio;
+        const sm = lane.sm;
+
+        try pio.sm_set_pin(sm, pin, 1, 1);
+        try pio.sm_set_pindir(sm, pin, 1, .out);
+        pio.gpio_init(pin);
+
+        pio.sm_load_and_start_program(
+            sm,
+            tx_prog,
+            .{
+                .clkdiv = div,
+                .shift = .{
+                    .out_shiftdir = .right,
+                    .autopull = false,
+                    .pull_threshold = 0,
+                    .join_tx = true,
+                },
+                .pin_mappings = .{
+                    .out = .single(pin),
+                    .side_set = .single(pin),
+                },
+                .exec = .{
+                    .side_set_optional = true,
+                },
+            },
+        ) catch unreachable;
+        pio.sm_set_enabled(sm, true);
+    }
+
+    const tx_prog = blk: {
+        @setEvalBranchQuota(10_000);
+        break :blk hal.pio.assemble(
+            \\ .program uart_tx
+            \\ .side_set 1 opt
+            \\     pull       side 1 [7]  ; Assert stop bit, or stall with line in idle state
+            \\     set x, 7   side 0 [7]  ; Preload bit counter, assert start bit for 8 clocks
+            \\ bitloop:                   ; This loop will run 8 times (8n1 UART)
+            \\     out pins, 1            ; Shift 1 bit from OSR to the first OUT pin
+            \\     jmp x-- bitloop   [6]  ; Each loop iteration is 8 cycles.
+        , .{}).get_program_by_name("uart_tx");
     };
 };
