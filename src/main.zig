@@ -269,9 +269,7 @@ const usart = PioUsart.init(.{
 });
 
 fn usartRxIrq() callconv(.c) void {
-    while (usart.hasData()) {
-        usartReceive();
-    }
+    usartReceive();
 }
 
 const SYNC_BYTE: u8 = 0x80;
@@ -432,16 +430,16 @@ fn primaryMain(usb_ctrl: *UsbController, usb_dev: *UsbDevice) void {
 
         usartStartMessage(.scan_request);
         scanMatrix(new_matrix_this);
-        while (!rx_frame_ready.load(.acquire)) { }
-        rx_frame_ready.store(false, .release);
-        @memcpy(new_matrix_opposite, &rx_frame);
+        if (rx_frame_ready.load(.acquire)) {
+            rx_frame_ready.store(false, .release);
+            @memcpy(new_matrix_opposite, &rx_frame);
+        }
         changed = !std.mem.eql(u8, &new_matrix, &matrix);
         matrix = new_matrix;
     }
 }
 
 fn secondaryMain() void {
-    time.sleep_ms(500);
     usartStartMessage(.secondary_ready);
 
     var matrix = [_]u8{0xff} ** matrix_arr_half_len;
@@ -493,7 +491,7 @@ const PioUsart = struct {
     fn init(_pins: struct { rx: gpio.Pin, tx: gpio.Pin }) PioUsart {
         return .{
             .rx = .{ .pin = _pins.rx, .pio = .pio0, .sm = .sm0 },
-            .tx = .{ .pin = _pins.tx, .pio = .pio1, .sm = .sm1 },
+            .tx = .{ .pin = _pins.tx, .pio = .pio0, .sm = .sm1 },
         };
     }
 
@@ -506,7 +504,6 @@ const PioUsart = struct {
     }
 
     inline fn write(self: *const PioUsart, value: u8) void {
-        std.log.debug("(INTERCONNECT WRITE): {x}", .{value});
         self.tx.pio.sm_blocking_write(self.tx.sm, value);
     }
 
@@ -515,12 +512,8 @@ const PioUsart = struct {
     }
 
     inline fn read(self: *const PioUsart) u8 {
-        // const value: u8 = @truncate(self.rx.pio.sm_blocking_read(self.rx.sm) >> 24);
-        // std.log.debug("(INTERCONNECT READ): {x}", .{value});
-        // return value;
         const ptr = @as([*]volatile u8, @ptrCast(self.rx.pio.sm_get_rx_fifo(self.rx.sm))) + 3;
         const value = @as(*volatile u8, @ptrCast(ptr)).*;
-        std.log.debug("(INTERCONNECT READ): {x}", .{value});
         return value;
     }
 
@@ -563,6 +556,7 @@ const PioUsart = struct {
         @setEvalBranchQuota(10_000);
         break :blk hal.pio.assemble(
             \\ .program uart_rx
+            \\ .wrap_target
             \\ start:
             \\     wait 0 pin 0        ; Stall until start bit is asserted
             \\     set x, 7    [10]    ; Preload bit counter, then delay until halfway through
@@ -577,6 +571,7 @@ const PioUsart = struct {
             \\
             \\ good_stop:              ; No delay before returning to start; a little slack is
             \\     push                ; important in case the TX clock is slightly too fast.
+            \\ .wrap
         , .{}).get_program_by_name("uart_rx");
     };
 
@@ -585,7 +580,7 @@ const PioUsart = struct {
         const pio = lane.pio;
         const sm = lane.sm;
 
-        pin.set_function(.pio1);
+        pin.set_function(.pio0);
         try pio.sm_set_pin(sm, pin, 1, 1);
         try pio.sm_set_pindir(sm, pin, 1, .out);
         pio.gpio_init(pin);
@@ -618,11 +613,13 @@ const PioUsart = struct {
         break :blk hal.pio.assemble(
             \\ .program uart_tx
             \\ .side_set 1 opt
+            \\ .wrap_target
             \\     pull       side 1 [7]  ; Assert stop bit, or stall with line in idle state
             \\     set x, 7   side 0 [7]  ; Preload bit counter, assert start bit for 8 clocks
             \\ bitloop:                   ; This loop will run 8 times (8n1 UART)
             \\     out pins, 1            ; Shift 1 bit from OSR to the first OUT pin
             \\     jmp x-- bitloop   [6]  ; Each loop iteration is 8 cycles.
+            \\ .wrap
         , .{}).get_program_by_name("uart_tx");
     };
 };
