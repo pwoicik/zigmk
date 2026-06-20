@@ -8,7 +8,10 @@ const usb = microzig.core.usb;
 const UsbDevice = hal.usb.Polled(.{});
 
 pub const panic = microzig.panic;
-pub const std_options = microzig.std_options(.{});
+pub const std_options = microzig.std_options(.{
+    .log_level = .debug,
+    .logFn = hal.uart.log,
+});
 
 comptime {
     _ = microzig.export_startup();
@@ -16,13 +19,9 @@ comptime {
 
 pub const microzig_options: microzig.Options = .{
     .interrupts = .{
-        .PIO0_IRQ_0 = .{ .c = interrupt_handler },
+        .PIO0_IRQ_0 = .{ .c = usartRxIrq },
     },
 };
-
-fn interrupt_handler() callconv(.c) void {
-    pins.led.put(1);
-}
 
 pub const Modifiers = packed struct(u8) {
     lctrl: bool,
@@ -123,6 +122,29 @@ const Keyboard = usb.drivers.hid.InterruptDriver(.{
 });
 
 const Drivers = struct { keyboard: Keyboard, reset: hal.usb.ResetDriver(null, 0) };
+
+const UsbController = usb.DeviceController(
+    .{
+        .bcd_usb = UsbDevice.max_supported_bcd_usb,
+        .device_triple = .unspecified,
+        .vendor = UsbDevice.default_vendor_id,
+        .product = UsbDevice.default_product_id,
+        .bcd_device = .v2_00,
+        .serial = "1",
+        .max_supported_packet_size = UsbDevice.max_supported_packet_size,
+        .configurations = &.{
+            .{
+                .Drivers = Drivers,
+                .attributes = .{ .self_powered = false },
+                .max_current_ma = 50,
+            },
+        },
+    },
+    .{.{
+        .keyboard = .{ .itf_string = "Boot Keyboard", .poll_interval = 1 },
+        .reset = "",
+    }},
+);
 
 const Pins = struct {
     led: hal.gpio.Pin,
@@ -239,7 +261,89 @@ inline fn setMatrixBit(matrix: *[matrix_arr_half_len]u8, bit_idx: u8, new_val: u
     }
 }
 
-fn detectMaster() bool {
+var is_primary = false;
+
+const usart = PioUsart.init(.{
+    .rx = if (config.half == .left) pins.serial.p0 else pins.serial.p1,
+    .tx = if (config.half == .left) pins.serial.p1 else pins.serial.p0,
+});
+
+fn usartRxIrq() callconv(.c) void {
+    while (usart.hasData()) {
+        usartReceive();
+    }
+}
+
+const SYNC_BYTE: u8 = 0x80;
+
+const MessageType = enum(u8) {
+    secondary_ready = 0x1,
+    scan_request = 0x2,
+    scan_result = 0x3,
+    _,
+};
+
+const UsartTxState = enum {
+    header,
+    msg_type,
+    matrix_data,
+};
+
+var tx_state: UsartTxState = .header;
+
+var is_secondary_ready = std.atomic.Value(bool).init(false);
+var scan_requested = std.atomic.Value(bool).init(false);
+
+var rx_frame: [matrix_arr_half_len]u8 = undefined;
+var rx_frame_cursor: usize = 0;
+var rx_frame_ready = std.atomic.Value(bool).init(false);
+
+fn usartReceive() void {
+    const byte = usart.read();
+    switch (tx_state) {
+        .header => {
+            if (byte == SYNC_BYTE) {
+                tx_state = .msg_type;
+            }
+        },
+        .msg_type => {
+            const msg_type: MessageType = @enumFromInt(byte);
+            switch (msg_type) {
+                .secondary_ready => {
+                    @branchHint(.unlikely);
+                    is_secondary_ready.store(true, .release);
+                    tx_state = .header;
+                },
+                .scan_request => {
+                    scan_requested.store(true, .release);
+                    tx_state = .header;
+                },
+                .scan_result => {
+                    tx_state = .matrix_data;
+                },
+                _ => {
+                    tx_state = .header;
+                },
+            }
+        },
+        .matrix_data => {
+            rx_frame[rx_frame_cursor] = byte;
+            rx_frame_cursor += 1;
+            if (rx_frame_cursor >= matrix_arr_half_len) {
+                rx_frame_cursor = 0;
+                rx_frame_ready.store(true, .release);
+                tx_state = .header;
+            }
+        },
+    }
+}
+
+fn usartStartMessage(msg_type: MessageType) void {
+    usart.write(SYNC_BYTE);
+    usart.write(@intFromEnum(msg_type));
+}
+
+fn detectIsPrimary() bool {
     var attempts: u32 = 0;
     while (attempts < 500_000) : (attempts += 1) {
         const sie_status = microzig.chip.peripherals.USB.SIE_STATUS.read();
@@ -252,41 +356,31 @@ fn detectMaster() bool {
 }
 
 pub fn main() !void {
-    pins.init();
-    _ = PioUart.init(.{ .rx = gpio.num(0), .tx = gpio.num(1) });
-
-    var usb_ctrl = usb.DeviceController(
-        .{
-            .bcd_usb = UsbDevice.max_supported_bcd_usb,
-            .device_triple = .unspecified,
-            .vendor = UsbDevice.default_vendor_id,
-            .product = UsbDevice.default_product_id,
-            .bcd_device = .v2_00,
-            .serial = "1",
-            .max_supported_packet_size = UsbDevice.max_supported_packet_size,
-            .configurations = &.{
-                .{
-                    .Drivers = Drivers,
-                    .attributes = .{ .self_powered = false },
-                    .max_current_ma = 50,
-                },
-            },
-        },
-        .{.{
-            .keyboard = .{ .itf_string = "Boot Keyboard", .poll_interval = 1 },
-            .reset = "",
-        }},
-    ).init;
+    var usb_ctrl = UsbController.init;
     var usb_dev = UsbDevice.init();
 
-    const isMaster = detectMaster();
+    initUartLogger();
+    pins.init();
+    microzig.interrupt.enable(.PIO0_IRQ_0);
+    usart.setup();
 
-    if (isMaster) {
-        Link.Master.init();
+    is_primary = detectIsPrimary();
+
+    if (is_primary) {
+        primaryMain(&usb_ctrl, &usb_dev);
     } else {
-        Link.Slave.init();
+        secondaryMain();
     }
+}
 
+fn initUartLogger() void {
+    const uart = hal.uart.instance.num(0);
+    uart.apply(.{ .clock_config = hal.clock_config });
+    gpio.num(0).set_function(.uart);
+    hal.uart.init_logger(uart);
+}
+
+fn primaryMain(usb_ctrl: *UsbController, usb_dev: *UsbDevice) void {
     var changed = false;
     var matrix = [_]u8{0xff} ** matrix_arr_len;
     var new_matrix = [_]u8{0xff} ** matrix_arr_len;
@@ -295,232 +389,100 @@ pub fn main() !void {
     const new_matrix_this = if (config.half == .left) new_matrix_left else new_matrix_right;
     const new_matrix_opposite = if (config.half == .left) new_matrix_right else new_matrix_left;
     while (true) {
-        if (isMaster) {
-            usb_dev.poll(&usb_ctrl);
-            if (usb_ctrl.drivers()) |d| {
-                const drivers: *Drivers = @ptrCast(d);
+        usb_dev.poll(usb_ctrl);
+        if (usb_ctrl.drivers()) |d| {
+            const drivers: *Drivers = @ptrCast(d);
 
-                if (changed) {
-                    changed = false;
-                    var report_keys = [_]Code{.reserved} ** 6;
-                    var report_idx: usize = 0;
-                    var key_idx: usize = 0;
-                    for (0..2) |half_idx| outer: {
-                        for(0..matrix_arr_half_len) |byte_idx| {
-                            const byte = matrix[half_idx * matrix_arr_half_len + byte_idx];
-                            for (0..8) |bit_idx| {
-                                const key_state = byte & (@as(u8, 1) << @truncate(bit_idx)) == 0;
-                                if (key_state) {
-                                    const keycode = MATRIX[key_idx];
-                                    report_keys[report_idx] = keycode;
-                                    report_idx += 1;
-                                    if (report_idx >= report_keys.len) {
-                                        break :outer;
-                                    }
+            if (changed) {
+                changed = false;
+                var report_keys = [_]Code{.reserved} ** 6;
+                var report_idx: usize = 0;
+                var key_idx: usize = 0;
+                for (0..2) |half_idx| outer: {
+                    for(0..matrix_arr_half_len) |byte_idx| {
+                        const byte = matrix[half_idx * matrix_arr_half_len + byte_idx];
+                        for (0..8) |bit_idx| {
+                            const key_state = byte & (@as(u8, 1) << @truncate(bit_idx)) == 0;
+                            if (key_state) {
+                                const keycode = MATRIX[key_idx];
+                                report_keys[report_idx] = keycode;
+                                report_idx += 1;
+                                if (report_idx >= report_keys.len) {
+                                    break :outer;
                                 }
-                                key_idx += 1;
                             }
+                            key_idx += 1;
                         }
                     }
-                    const report: KeyboardInReport = .{
-                        .modifiers = .none,
-                        .keys = report_keys,
-                    };
-                    _ = drivers.keyboard.send_report(&report);
                 }
-
-                _ = drivers.keyboard.receive_report();
+                const report: KeyboardInReport = .{
+                    .modifiers = .none,
+                    .keys = report_keys,
+                };
+                _ = drivers.keyboard.send_report(&report);
             }
+
+            _ = drivers.keyboard.receive_report();
         }
 
-        for (pins.rows, 0..) |row, row_idx| {
-            row.put(0);
-            time.sleep_us(2);
-            for (0..col_count) |col_idx| {
-                const col = if (config.half == .left)
-                    pins.cols[col_idx]
-                else
-                    pins.cols[col_count - col_idx - 1];
-                const bit_idx = row_idx * col_count + col_idx;
-                setMatrixBit(
-                    new_matrix_this,
-                    @truncate(bit_idx),
-                    col.read(),
-                );
-            }
-            row.put(1);
+        if (!is_secondary_ready.load(.acquire)) {
+            @branchHint(.unlikely);
+            continue;
         }
-        if (isMaster) {
-            const slice = new_matrix_opposite;
-            Link.Master.read_matrix(slice) catch {};
-            changed = !std.mem.eql(u8, &new_matrix, &matrix);
-            matrix = new_matrix;
-        } else {
-            const slice = new_matrix_this;
-            Link.Slave.send_matrix(slice);
+
+        usartStartMessage(.scan_request);
+        scanMatrix(new_matrix_this);
+        while (!rx_frame_ready.load(.acquire)) { }
+        rx_frame_ready.store(false, .release);
+        @memcpy(new_matrix_opposite, &rx_frame);
+        changed = !std.mem.eql(u8, &new_matrix, &matrix);
+        matrix = new_matrix;
+    }
+}
+
+fn secondaryMain() void {
+    time.sleep_ms(500);
+    usartStartMessage(.secondary_ready);
+
+    var matrix = [_]u8{0xff} ** matrix_arr_half_len;
+    while (true) {
+        asm volatile ("wfi");
+        if (scan_requested.load(.acquire)) {
+            scan_requested.store(false, .release);
+            scanMatrix(&matrix);
+            usartStartMessage(.scan_result);
+            for (matrix) |byte| {
+                usart.write(byte);
+            }
         }
     }
 }
 
-const Link = struct {
-    const HALF_PERIOD_US: u32 = 4;
-
-    const FRAME_TIMEOUT_US: u32 = 2_000;
-
-    const FRAME_BITS: usize = 1 + matrix_half_s + 8 + 1;
-
-    pub const Matrix = [matrix_arr_half_len]u8;
-
-    pub const Error = error{
-        Timeout,
-        BadStartBit,
-        BadStopBit,
-        CrcMismatch,
-    };
-
-    inline fn get_bit(m: *const [matrix_arr_half_len]u8, row: u8, col: u8) u1 {
-        const idx = @as(usize, row) * pins.cols.len + col;
-        const byte = m[idx / 8];
-        const shift: u3 = @intCast(7 - (idx % 8));
-        return @intCast((byte >> shift) & 1);
+fn scanMatrix(matrix: *[matrix_arr_half_len]u8) void {
+    for (pins.rows, 0..) |row, row_idx| {
+        row.put(0);
+        time.sleep_us(2);
+        for (0..col_count) |col_idx| {
+            const col = if (config.half == .left)
+                pins.cols[col_idx]
+            else
+                pins.cols[col_count - col_idx - 1];
+            const bit_idx = row_idx * col_count + col_idx;
+            setMatrixBit(
+                matrix,
+                @truncate(bit_idx),
+                col.read(),
+            );
+        }
+        row.put(1);
     }
+}
 
-    inline fn set_bit(m: *[matrix_arr_half_len]u8, row: u8, col: u8, value: u1) void {
-        const idx = @as(usize, row) * pins.cols.len + col;
-        const shift: u3 = @intCast(7 - (idx % 8));
-        const mask: u8 = @as(u8, 1) << shift;
-        if (value == 1) m[idx / 8] |= mask else m[idx / 8] &= ~mask;
-    }
-
-    fn crc8(bytes: []const u8) u8 {
-        var crc: u8 = 0;
-        for (bytes) |b| {
-            crc ^= b;
-            var i: u3 = 0;
-            while (i < 7) : (i += 1) {
-                crc = if ((crc & 0x80) != 0) (crc << 1) ^ 0x07 else crc << 1;
-            }
-            crc = if ((crc & 0x80) != 0) (crc << 1) ^ 0x07 else crc << 1;
-        }
-        return crc;
-    }
-
-    pub const Master = struct {
-        clk: gpio.Pin = pins.serial.p0,
-        data: gpio.Pin = pins.serial.p0,
-
-        pub fn init() void {
-            pins.serial.p0.set_function(.sio);
-            pins.serial.p1.set_function(.sio);
-
-            pins.serial.p0.put(0);
-            pins.serial.p0.set_direction(.out);
-
-            pins.serial.p1.set_direction(.in);
-            pins.serial.p1.set_pull(.down);
-        }
-
-        inline fn half_period() void {
-            time.sleep_us(HALF_PERIOD_US);
-        }
-
-        inline fn clock_one_bit() u1 {
-            pins.serial.p0.put(1);
-            half_period();
-            const bit = pins.serial.p1.read();
-            pins.serial.p0.put(0);
-            half_period();
-            return bit;
-        }
-
-        pub fn read_matrix(out: *[matrix_arr_half_len]u8) Error!void {
-            const max_start_attempts: u32 =
-                FRAME_TIMEOUT_US / (2 * HALF_PERIOD_US) + 1;
-
-            var start_bit: u1 = 0;
-            var attempt: u32 = 0;
-            while (attempt < max_start_attempts) : (attempt += 1) {
-                start_bit = clock_one_bit();
-                if (start_bit == 1) break;
-            }
-            if (start_bit != 1) return Error.Timeout;
-
-            var i: usize = 0;
-            while (i < matrix_half_s) : (i += 1) {
-                const bit = clock_one_bit();
-                const shift: u3 = @intCast(7 - (i % 8));
-                out[i / 8] |= @as(u8, bit) << shift;
-            }
-
-            var rx_crc: u8 = 0;
-            var j: u4 = 0;
-            while (j < 8) : (j += 1) {
-                const bit = clock_one_bit();
-                rx_crc = (rx_crc << 1) | @as(u8, bit);
-            }
-
-            const stop = clock_one_bit();
-            if (stop != 0) return Error.BadStopBit;
-
-            if (rx_crc != crc8(out[0..])) return Error.CrcMismatch;
-        }
-    };
-
-    pub const Slave = struct {
-        clk: gpio.Pin = pins.serial.p0,
-        data: gpio.Pin = pins.serial.p1,
-
-        pub fn init() void {
-            pins.serial.p0.set_function(.sio);
-            pins.serial.p1.set_function(.sio);
-
-            pins.serial.p0.set_direction(.in);
-            pins.serial.p0.set_pull(.down);
-
-            pins.serial.p1.put(0);
-            pins.serial.p1.set_direction(.out);
-        }
-
-        inline fn wait_clk_high() void {
-            while (pins.serial.p0.read() == 0) {}
-        }
-
-        inline fn wait_clk_low() void {
-            while (pins.serial.p0.read() == 1) {}
-        }
-
-        inline fn shift_one_bit(bit: u1) void {
-            wait_clk_high();
-            pins.serial.p1.put(bit);
-            wait_clk_low();
-        }
-
-        pub fn send_matrix(m: *const [matrix_arr_half_len]u8) void {
-            shift_one_bit(1);
-
-            var i: usize = 0;
-            while (i < matrix_half_s) : (i += 1) {
-                const shift: u3 = @intCast(7 - (i % 8));
-                const bit: u1 = @intCast((m[i / 8] >> shift) & 1);
-                shift_one_bit(bit);
-            }
-
-            const crc = crc8(m[0..]);
-            var j: i32 = 7;
-            while (j >= 0) : (j -= 1) {
-                const bit: u1 = @intCast((crc >> @intCast(j)) & 1);
-                shift_one_bit(bit);
-            }
-
-            shift_one_bit(0);
-        }
-    };
-};
-
-const PioUart = struct {
+const PioUsart = struct {
     const BAUD = 115_200;
 
     const Lane = struct {
+        pin: gpio.Pin,
         pio: hal.pio.Pio,
         sm: hal.pio.StateMachine,
     };
@@ -528,33 +490,46 @@ const PioUart = struct {
     rx: Lane,
     tx: Lane,
 
-    fn init(_pins: struct { rx: gpio.Pin, tx: gpio.Pin }) PioUart {
-        const self = PioUart{
-            .rx = .{ .pio = .pio0, .sm = .sm0 },
-            .tx = .{ .pio = .pio0, .sm = .sm1 },
+    fn init(_pins: struct { rx: gpio.Pin, tx: gpio.Pin }) PioUsart {
+        return .{
+            .rx = .{ .pin = _pins.rx, .pio = .pio0, .sm = .sm0 },
+            .tx = .{ .pin = _pins.tx, .pio = .pio1, .sm = .sm1 },
         };
+    }
+
+    fn setup(self: *const PioUsart) void {
         const div = hal.pio.ClkDivOptions.from_float(
             @as(f32, @floatFromInt(hal.clock_config.sys.?.frequency())) / (8 * BAUD),
         );
-        __initRx(_pins.rx, self.rx, div) catch unreachable;
-        __initTx(_pins.tx, self.tx, div) catch unreachable;
-        return self;
+        __initRx(self.rx, div) catch unreachable;
+        __initTx(self.tx, div) catch unreachable;
     }
 
-    inline fn write(self: *const PioUart, value: u8) void {
+    inline fn write(self: *const PioUsart, value: u8) void {
+        std.log.debug("(INTERCONNECT WRITE): {x}", .{value});
         self.tx.pio.sm_blocking_write(self.tx.sm, value);
     }
 
-    inline fn read(self: *const PioUart) u8 {
-        const value = @as([*]volatile u8, @ptrCast(self.rx.pio.sm_get_rx_fifo(self.rx.sm))) + 3;
-        while (self.rx.pio.sm_is_rx_fifo_empty(self.rx.sm)) {}
-        return @as(*volatile u8, @ptrCast(value)).*;
+    inline fn hasData(self: *const PioUsart) bool {
+        return !self.rx.pio.sm_is_rx_fifo_empty(self.rx.sm);
     }
 
-    fn __initRx(pin: gpio.Pin, lane: Lane, div: hal.pio.ClkDivOptions) !void {
+    inline fn read(self: *const PioUsart) u8 {
+        // const value: u8 = @truncate(self.rx.pio.sm_blocking_read(self.rx.sm) >> 24);
+        // std.log.debug("(INTERCONNECT READ): {x}", .{value});
+        // return value;
+        const ptr = @as([*]volatile u8, @ptrCast(self.rx.pio.sm_get_rx_fifo(self.rx.sm))) + 3;
+        const value = @as(*volatile u8, @ptrCast(ptr)).*;
+        std.log.debug("(INTERCONNECT READ): {x}", .{value});
+        return value;
+    }
+
+    fn __initRx(lane: Lane, div: hal.pio.ClkDivOptions) !void {
+        const pin = lane.pin;
         const pio = lane.pio;
         const sm = lane.sm;
 
+        pin.set_function(.pio0);
         try pio.sm_set_pindir(sm, pin, 1, .in);
         pio.gpio_init(pin);
         pin.set_pull(.up);
@@ -567,7 +542,9 @@ const PioUart = struct {
                 .shift = .{
                     .in_shiftdir = .right,
                     .autopush = false,
+                    // .autopush = true,
                     .push_threshold = 0,
+                    // .push_threshold = 8,
                     .join_rx = true,
                 },
                 .pin_mappings = .{
@@ -603,10 +580,12 @@ const PioUart = struct {
         , .{}).get_program_by_name("uart_rx");
     };
 
-    fn __initTx(pin: gpio.Pin, lane: Lane, div: hal.pio.ClkDivOptions) !void {
+    fn __initTx(lane: Lane, div: hal.pio.ClkDivOptions) !void {
+        const pin = lane.pin;
         const pio = lane.pio;
         const sm = lane.sm;
 
+        pin.set_function(.pio1);
         try pio.sm_set_pin(sm, pin, 1, 1);
         try pio.sm_set_pindir(sm, pin, 1, .out);
         pio.gpio_init(pin);

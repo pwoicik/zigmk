@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .microzig = .{
-            .url = "https://github.com/ZigEmbeddedGroup/microzig/archive/2a4a220b66c53751a24bd9a1a68136e9473953d3.zip",
-            .hash = "microzig-0.15.2-D20YSe7z3wDvkqhg-Yd7RnSw3DJ4SnKV4VpXWeJUKyRx",
+            .url = "https://github.com/ZigEmbeddedGroup/microzig/archive/95686d462341b5b347215d386ddf41a0f6b7670d.zip",
+            .hash = "microzig-0.15.2-D20YSa363wBBZcnDnJo4_Ej3J0MZaa_WKvAXp5vygb0v",
         },
     },
     .paths = .{
