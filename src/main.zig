@@ -301,12 +301,13 @@ inline fn populatePressedKeys(out: *[6]ScanCode, matrix: *const Matrix) void {
         for (0..8) |bit_idx| {
             const key_state = Matrix.getKeyState(byte, @truncate(bit_idx));
             if (key_state == .pressed) {
+                if (report_idx >= out.len) {
+                    @memset(out, ScanCode.error_roll_over);
+                    return;
+                }
                 const keycode = MATRIX[key_idx];
                 out[report_idx] = keycode;
                 report_idx += 1;
-                if (report_idx >= out.len) {
-                    return;
-                }
             }
             key_idx += 1;
         }
