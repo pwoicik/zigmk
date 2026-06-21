@@ -5,10 +5,10 @@ const hal = microzig.hal;
 const gpio = hal.gpio;
 const time = hal.time;
 const KeyboardHid = @import("KeyboardHid.zig");
-const ScanCode = KeyboardHid.ScanCode;
 const PioUsart = @import("PioUsart.zig");
 const Half = @import("half.zig").Half;
 const mx = @import("matrix.zig");
+const ks = @import("state.zig");
 
 const half: Half = switch (buid_config.half) {
     .left => .left,
@@ -103,30 +103,6 @@ else
         .led = gpio.num(25),
     };
 
-const Matrix = mx.Matrix(.{
-    .col_count = pins.cols.len,
-    .row_count = pins.rows.len,
-    .half = half,
-});
-
-const MATRIX = [_]ScanCode{
-    // zig fmt: off
-    .b,        .l,        .d,        .c,        .v,
-    .n,        .z,        .t,        .s,        .g,
-    .x,        .q,        .m,        .w,        .reserved,
-    .escape,   .reserved, .reserved, .space,    .delete,
-    .reserved, .reserved, .reserved, .reserved,
-
-    .j,        .f,        .o,        .u,        .@";",
-    .y,        .h,        .a,        .e,        .i,
-    .k,        .p,        .@",",     .@".",     .@"/",
-    .enter,    .r,        .reserved, .reserved, .reserved,
-    .reserved, .reserved, .reserved, .reserved,
-    // zig fmt: on
-};
-
-var is_primary = false;
-
 const usart = PioUsart.init(.{
     .rx_pin = if (half == .left) pins.serial.p0 else pins.serial.p1,
     .tx_pin = if (half == .left) pins.serial.p1 else pins.serial.p0,
@@ -211,7 +187,7 @@ pub fn main() !void {
     microzig.interrupt.enable(.PIO0_IRQ_0);
     usart.setup();
 
-    is_primary = keyboard_hid.isPluggedIn();
+    const is_primary = keyboard_hid.isPluggedIn();
 
     if (is_primary) {
         primaryMain(&keyboard_hid);
@@ -227,14 +203,71 @@ fn initUartLogger() void {
     hal.uart.init_logger(uart);
 }
 
+const Matrix = mx.Matrix(.{
+    .col_count = pins.cols.len,
+    .row_count = pins.rows.len,
+    .half = half,
+});
+
+const Layer = enum {
+    default,
+};
+
+const CustomKey = enum {};
+
+const Key = ks.types.Key(CustomKey);
+
+const KeyConfig = ks.types.KeyConfig(Key);
+
+const KeyboardState = ks.KeyboardState(.{
+    .Matrix = Matrix,
+    .Layer = Layer,
+    .CustomKey = CustomKey,
+});
+
+fn keymap(comptime km: [38]KeyConfig) [KeyboardState.keymap_size]KeyConfig {
+    return .{
+        // zig fmt: off
+                km[0],  km[1],  km[2],  km[3],  km[4],
+        km[15], km[5],  km[6],  km[7],  km[8],  km[9],
+                km[10], km[11], km[12], km[13], km[14],
+                                .no,    km[16], km[17], km[18],
+        .no,    .no,    .no,    .no,
+
+                km[19], km[20], km[21], km[22], km[23],
+                km[24], km[25], km[26], km[27], km[28], km[37],
+                km[29], km[30], km[31], km[32], km[33],
+        km[34], km[35], km[36], .no,
+        .no,    .no,    .no,    .no,
+        // zig fmt: on
+    };
+}
+
+const default_keymap = keymap(.{
+    // zig fmt: off
+    // left ------------------------------------------------------------------------------------------
+                  .ps(.b),      .ps(.l),      .ps(.d),      .ps(.c),      .ps(.v),
+    .ps(.escape), .ps(.n),      .ps(.z),      .ps(.t),      .ps(.s),      .ps(.g),
+                  .ps(.x),      .ps(.q),      .ps(.m),      .ps(.w),      .no,
+                                                            .no,          .ps(.space),  .ps(.delete),
+
+    // right -----------------------------------------------------------------------------------------
+                  .ps(.j),      .ps(.f),      .ps(.o),      .ps(.u),      .ps(.@";"),
+                  .ps(.y),      .ps(.h),      .ps(.a),      .ps(.e),      .ps(.i),
+                  .ps(.k),      .ps(.p),      .ps(.@","),   .ps(.@"."),   .ps(.@"/"),
+    .ps(.enter),  .ps(.r),      .no,                                                    .no,
+    // zig fmt: on
+});
+
 fn primaryMain(keyboard_hid: *KeyboardHid) noreturn {
-    var changed = false;
+    var keys_changed = false;
     var matrix = Matrix{};
+    var state = KeyboardState.init(.{.default = default_keymap});
     while (true) {
         keyboard_hid.poll();
-        if (changed) {
-            changed = false;
-            const report = buildReport(&matrix);
+        if (keys_changed) {
+            keys_changed = false;
+            const report = buildReport(&state);
             _ = keyboard_hid.sendReport(&report);
         }
         _ = keyboard_hid.receive_report();
@@ -246,7 +279,8 @@ fn primaryMain(keyboard_hid: *KeyboardHid) noreturn {
         scanMatrix(&matrix);
         // there might be partial updates, idk if thats gonna be a problem
         matrix.updateOppositeHalf(&rx_frame);
-        changed = matrix.commitUpdates();
+        matrix.commitUpdates();
+        keys_changed = state.update(&matrix);
     }
 }
 
@@ -284,43 +318,10 @@ inline fn scanMatrix(matrix: *Matrix) void {
     }
 }
 
-inline fn buildReport(matrix: *const Matrix) KeyboardHid.InReport {
-    var report: KeyboardHid.InReport = .{
-        .modifiers = .none,
-        .keys = [_]ScanCode{.reserved} ** 6,
+inline fn buildReport(state: *const KeyboardState) KeyboardHid.InReport {
+    const report: KeyboardHid.InReport = .{
+        .modifiers = state.pressed_keys.mods,
+        .keys = state.pressed_keys.keys,
     };
-    populatePressedKeys(&report, matrix);
     return report;
-}
-
-inline fn populatePressedKeys(report: *KeyboardHid.InReport, matrix: *const Matrix) void {
-    var report_idx: usize = 0;
-    var key_idx: usize = 0;
-    for (matrix.state) |byte| {
-        for (0..8) |bit_idx| {
-            const key_state = Matrix.getKeyState(byte, @truncate(bit_idx));
-            if (key_state == .pressed) {
-                const keycode = MATRIX[key_idx];
-                switch (keycode) {
-                    .lalt => report.modifiers.lalt = true,
-                    .ralt => report.modifiers.ralt = true,
-                    .lctrl => report.modifiers.lctrl = true,
-                    .rctrl => report.modifiers.rctrl = true,
-                    .lgui => report.modifiers.lgui = true,
-                    .rgui => report.modifiers.rgui = true,
-                    .lshift => report.modifiers.lshift = true,
-                    .rshift => report.modifiers.rshift = true,
-                    else => {
-                        if (report_idx >= report.keys.len) {
-                            @memset(&report.keys, ScanCode.error_roll_over);
-                            return;
-                        }
-                        report.keys[report_idx] = keycode;
-                        report_idx += 1;
-                    },
-                }
-            }
-            key_idx += 1;
-        }
-    }
 }

@@ -4,47 +4,14 @@ const usb = microzig.core.usb;
 const hal = microzig.hal;
 const time = hal.time;
 const peripherals = microzig.chip.peripherals;
+const Modifiers = @import("state.zig").types.Modifiers;
 
 const Self = @This();
-
-pub const Modifiers = packed struct(u8) {
-    lctrl: bool,
-    lshift: bool,
-    lalt: bool,
-    lgui: bool,
-    rctrl: bool,
-    rshift: bool,
-    ralt: bool,
-    rgui: bool,
-
-    pub const none: @This() = @bitCast(@as(u8, 0));
-};
-
-pub const ScanCode = enum(u8) {
-    // Codes taken from https://gist.github.com/mildsunrise/4e231346e2078f440969cdefb6d4caa3
-    // zig fmt: off
-        reserved = 0x00, error_roll_over, post_fail, error_undefined,
-        a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z,
-        top_1, top_2, top_3, top_4, top_5, top_6, top_7, top_8, top_9, top_0,
-        enter, escape, delete, tab, space,
-        @"-", @"=", @"[", @"]", @"\\", @"non_us_#", @";", @"'", @"`", @",", @".", @"/",
-        caps_lock,
-        f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12,
-        print_screen, scroll_lock, pause, insert, home, page_up, delete_forward, end, page_down,
-        right_arrow, left_arrow, down_arrow, up_arrow, num_lock,
-        kpad_div, kpad_mul, kpad_sub, kpad_add, kpad_enter,
-        kpad_1, kpad_2, kpad_3, kpad_4, kpad_5, kpad_6, kpad_7, kpad_8, kpad_9, kpad_0,
-        kpad_delete, @"non_us_\\", application, power, @"kpad_=",
-        f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24,
-        lctrl = 224, lshift, lalt, lgui, rctrl, rshift, ralt, rgui,
-        // zig fmt: on
-    _,
-};
 
 pub const InReport = extern struct {
     modifiers: Modifiers,
     reserved: u8 = 0,
-    keys: [6]ScanCode,
+    keys: [6]u8,
 
     comptime {
         std.debug.assert(@sizeOf(@This()) == 8);

@@ -34,10 +34,8 @@ pub fn Matrix(comptime config: Config) type {
             @memcpy(getOppositeHalfOf(&self.new_state), value);
         }
 
-        pub inline fn commitUpdates(self: *@This()) bool {
-            const changed = std.mem.eql(u8, &self.new_state, &self.state);
+        pub inline fn commitUpdates(self: *@This()) void {
             self.state = self.new_state;
-            return changed;
         }
 
         pub inline fn getKeyState(byte: u8, idx: u3) KeyState {
