@@ -286,28 +286,40 @@ inline fn scanMatrix(matrix: *Matrix) void {
 }
 
 inline fn buildReport(matrix: *const Matrix) KeyboardHid.InReport {
-    var report_keys = [_]ScanCode{.reserved} ** 6;
-    populatePressedKeys(&report_keys, matrix);
-    return .{
+    var report: KeyboardHid.InReport = .{
         .modifiers = .none,
-        .keys = report_keys,
+        .keys = [_]ScanCode{.reserved} ** 6,
     };
+    populatePressedKeys(&report, matrix);
+    return report;
 }
 
-inline fn populatePressedKeys(out: *[6]ScanCode, matrix: *const Matrix) void {
+inline fn populatePressedKeys(report: *KeyboardHid.InReport, matrix: *const Matrix) void {
     var report_idx: usize = 0;
     var key_idx: usize = 0;
     for (matrix.state) |byte| {
         for (0..8) |bit_idx| {
             const key_state = Matrix.getKeyState(byte, @truncate(bit_idx));
             if (key_state == .pressed) {
-                if (report_idx >= out.len) {
-                    @memset(out, ScanCode.error_roll_over);
-                    return;
-                }
                 const keycode = MATRIX[key_idx];
-                out[report_idx] = keycode;
-                report_idx += 1;
+                switch (keycode) {
+                    .lalt => report.modifiers.lalt = true,
+                    .ralt => report.modifiers.ralt = true,
+                    .lctrl => report.modifiers.lctrl = true,
+                    .rctrl => report.modifiers.rctrl = true,
+                    .lgui => report.modifiers.lgui = true,
+                    .rgui => report.modifiers.rgui = true,
+                    .lshift => report.modifiers.lshift = true,
+                    .rshift => report.modifiers.rshift = true,
+                    else => {
+                        if (report_idx >= report.keys.len) {
+                            @memset(&report.keys, ScanCode.error_roll_over);
+                            return;
+                        }
+                        report.keys[report_idx] = keycode;
+                        report_idx += 1;
+                    },
+                }
             }
             key_idx += 1;
         }
