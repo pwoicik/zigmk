@@ -19,16 +19,15 @@ pub const panic = microzig.panic;
 pub const std_options = microzig.std_options(.{
     .logFn = hal.uart.log,
 });
-
-comptime {
-    microzig.export_startup();
-}
-
 pub const microzig_options: microzig.Options = .{
     .interrupts = .{
         .PIO0_IRQ_0 = .{ .c = usartRxIrq },
     },
 };
+
+comptime {
+    microzig.export_startup();
+}
 
 const Pins = struct {
     led: hal.gpio.Pin,
