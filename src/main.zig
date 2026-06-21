@@ -115,13 +115,13 @@ const MATRIX = [_]ScanCode{
     .b,        .l,        .d,        .c,        .v,
     .n,        .z,        .t,        .s,        .g,
     .x,        .q,        .m,        .w,        .reserved,
-    .escape,   .reserved, .reserved, .reserved, .reserved,
+    .escape,   .reserved, .reserved, .space,    .delete,
     .reserved, .reserved, .reserved, .reserved,
 
     .j,        .f,        .o,        .u,        .@";",
     .y,        .h,        .a,        .e,        .i,
     .k,        .p,        .@",",     .@".",     .@"/",
-    .reserved, .r,        .reserved, .reserved, .reserved,
+    .enter,    .r,        .reserved, .reserved, .reserved,
     .reserved, .reserved, .reserved, .reserved,
     // zig fmt: on
 };
@@ -240,12 +240,10 @@ fn primaryMain(keyboard_hid: *KeyboardHid) noreturn {
         }
         _ = keyboard_hid.receive_report();
 
-        if (!is_secondary_ready.load(.acquire)) {
-            @branchHint(.unlikely);
-            continue;
+        if (is_secondary_ready.load(.acquire)) {
+            @branchHint(.likely);
+            usartStartMessage(.scan_request);
         }
-
-        usartStartMessage(.scan_request);
         scanMatrix(&matrix);
         // there might be partial updates, idk if thats gonna be a problem
         matrix.updateOppositeHalf(&rx_frame);
