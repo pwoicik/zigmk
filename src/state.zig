@@ -1,4 +1,5 @@
 const std = @import("std");
+const tst = std.testing;
 const timer = @import("timer.zig");
 const kc = @import("key_codes.zig");
 
@@ -118,7 +119,7 @@ pub fn KeyboardState(comptime config: Config) type {
         pub const keymap_size = @typeInfo(config.Matrix.State).array.len * 8;
 
         const Key = types.Key(config.CustomKey);
-        const KeyConfig = types.KeyConfig(Key);
+        pub const KeyConfig = types.KeyConfig(Key);
         pub const Keymap = [keymap_size]KeyConfig;
 
         const Layer = config.Layer;
@@ -156,8 +157,8 @@ pub fn KeyboardState(comptime config: Config) type {
             const active_layer = self.getHighestAciveLayer();
             var key_idx: usize = 0;
             for (matrix.state) |byte| {
-                defer key_idx += 1;
                 for (0..8) |bit_idx| {
+                    defer key_idx += 1;
                     const was_pressed = self.key_states[key_idx].is_pressed;
                     const is_pressed = config.Matrix.getKeyState(byte, @truncate(bit_idx)) == .pressed;
                     if (is_pressed != was_pressed) {
@@ -176,7 +177,7 @@ pub fn KeyboardState(comptime config: Config) type {
 
         inline fn updatePressedKeys(self: *@This()) bool {
             const pressed_keys = self.scanPressedKeys();
-            const changed = std.mem.eql(
+            const changed = !std.mem.eql(
                 u8,
                 std.mem.asBytes(&pressed_keys),
                 std.mem.asBytes(&self.pressed_keys),
@@ -185,6 +186,7 @@ pub fn KeyboardState(comptime config: Config) type {
             return changed;
         }
 
+        // TODO: rollover handling
         inline fn scanPressedKeys(self: *const @This()) types.PressedKeys {
             var pressed_idx: usize = 0;
             var pressed_keys = types.PressedKeys.empty;
@@ -196,7 +198,7 @@ pub fn KeyboardState(comptime config: Config) type {
                     switch (key_config) {
                         .press => |p| switch (p) {
                             .standard => |s| {
-                                if (pressed_idx < pressed_keys.keys.len) {
+                                if (s != .no and pressed_idx < pressed_keys.keys.len) {
                                     pressed_keys.keys[pressed_idx] = @intFromEnum(s);
                                     pressed_idx += 1;
                                 }
@@ -219,7 +221,8 @@ pub fn KeyboardState(comptime config: Config) type {
                                     .rgui => pressed_keys.mods.rgui = true,
                                 }
                             } else {
-                                if (pressed_idx < pressed_keys.keys.len) {
+                                // TODO: this should execute if released before the timer elapses
+                                if (mt.key != .no and pressed_idx < pressed_keys.keys.len) {
                                     pressed_keys.keys[pressed_idx] = @intFromEnum(mt.key);
                                     pressed_idx += 1;
                                 }
@@ -254,4 +257,51 @@ pub fn KeyboardState(comptime config: Config) type {
             unreachable;
         }
     };
+}
+
+test "init" {
+    const mx = @import("matrix.zig");
+    const M = mx.Matrix(.{
+        .col_count = 16,
+        .row_count = 16,
+        .half = .left,
+    });
+    const L = enum { default };
+    const KS = KeyboardState(.{
+        .Layer = L,
+        .Matrix = M,
+    });
+    const state = KS.init(.{
+        .default = [_]KS.KeyConfig{.ps(.a)} ** KS.keymap_size,
+    });
+
+    try tst.expectEqualDeep(state.pressed_keys, types.PressedKeys.empty);
+}
+
+test "update" {
+    const mx = @import("matrix.zig");
+    const M = mx.Matrix(.{
+        .col_count = 4,
+        .row_count = 4,
+        .half = .left,
+    });
+    const L = enum { default };
+    const KS = KeyboardState(.{
+        .Layer = L,
+        .Matrix = M,
+    });
+    const sk = kc.StandardKey.a;
+    var state = KS.init(.{
+        .default = [_]KS.KeyConfig{.ps(sk)} ** KS.keymap_size,
+    });
+    var matrix: M = .{};
+
+    matrix.state[0] = 0x3f;
+    const changed = state.update(&matrix);
+
+    try tst.expect(changed);
+    try tst.expectEqual(0, @as(u8, @bitCast(state.pressed_keys.mods)));
+
+    const expected_keys: [6]u8 = .{ @intFromEnum(sk), @intFromEnum(sk), 0, 0, 0, 0 };
+    try tst.expectEqual(expected_keys, state.pressed_keys.keys);
 }

@@ -215,36 +215,34 @@ const Layer = enum {
 
 const CustomKey = enum {};
 
-const Key = ks.types.Key(CustomKey);
-
-const KeyConfig = ks.types.KeyConfig(Key);
-
 const KeyboardState = ks.KeyboardState(.{
     .Matrix = Matrix,
     .Layer = Layer,
     .CustomKey = CustomKey,
 });
 
+const KeyConfig = KeyboardState.KeyConfig;
+
 fn keymap(comptime km: [38]KeyConfig) [KeyboardState.keymap_size]KeyConfig {
     return .{
         // zig fmt: off
-                km[0],  km[1],  km[2],  km[3],  km[4],
-        km[15], km[5],  km[6],  km[7],  km[8],  km[9],
-                km[10], km[11], km[12], km[13], km[14],
-                                .no,    km[16], km[17], km[18],
+        km[0],  km[1],  km[2],  km[3],  km[4],
+        km[6],  km[7],  km[8],  km[9],  km[10],
+        km[11], km[12], km[13], km[14], km[15],
+        km[5],  .no,    km[16], km[17], km[18],
         .no,    .no,    .no,    .no,
 
-                km[19], km[20], km[21], km[22], km[23],
-                km[24], km[25], km[26], km[27], km[28], km[37],
-                km[29], km[30], km[31], km[32], km[33],
-        km[34], km[35], km[36], .no,
+        km[19], km[20], km[21], km[22], km[23],
+        km[24], km[25], km[26], km[27], km[28],
+        km[29], km[30], km[31], km[32], km[33],
+        km[34], km[35], km[36], .no,    km[37],
         .no,    .no,    .no,    .no,
         // zig fmt: on
     };
 }
 
+// zig fmt: off
 const default_keymap = keymap(.{
-    // zig fmt: off
     // left ------------------------------------------------------------------------------------------
                   .ps(.b),      .ps(.l),      .ps(.d),      .ps(.c),      .ps(.v),
     .ps(.escape), .ps(.n),      .ps(.z),      .ps(.t),      .ps(.s),      .ps(.g),
@@ -256,13 +254,13 @@ const default_keymap = keymap(.{
                   .ps(.y),      .ps(.h),      .ps(.a),      .ps(.e),      .ps(.i),
                   .ps(.k),      .ps(.p),      .ps(.@","),   .ps(.@"."),   .ps(.@"/"),
     .ps(.enter),  .ps(.r),      .no,                                                    .no,
-    // zig fmt: on
 });
+// zig fmt: on
 
 fn primaryMain(keyboard_hid: *KeyboardHid) noreturn {
     var keys_changed = false;
     var matrix = Matrix{};
-    var state = KeyboardState.init(.{.default = default_keymap});
+    var state = KeyboardState.init(.{ .default = default_keymap });
     while (true) {
         keyboard_hid.poll();
         if (keys_changed) {
