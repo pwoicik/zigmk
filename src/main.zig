@@ -1,5 +1,5 @@
 const std = @import("std");
-const config = @import("build_config");
+const buid_config = @import("build_config");
 const microzig = @import("microzig");
 const hal = microzig.hal;
 const gpio = hal.gpio;
@@ -7,15 +7,21 @@ const time = hal.time;
 const KeyboardHid = @import("KeyboardHid.zig");
 const ScanCode = KeyboardHid.ScanCode;
 const PioUsart = @import("PioUsart.zig");
+const Half = @import("half.zig").Half;
+const mx = @import("matrix.zig");
+
+const half: Half = switch (buid_config.half) {
+    .left => .left,
+    .right => .right,
+};
 
 pub const panic = microzig.panic;
 pub const std_options = microzig.std_options(.{
-    .log_level = .debug,
     .logFn = hal.uart.log,
 });
 
 comptime {
-    _ = microzig.export_startup();
+    microzig.export_startup();
 }
 
 pub const microzig_options: microzig.Options = .{
@@ -55,7 +61,7 @@ const SerialPins = struct {
     p1: gpio.Pin,
 };
 
-const pins = if (config.board == .pico2)
+const pins = if (buid_config.board == .pico2)
     Pins{
         .rows = .{
             gpio.num(6),
@@ -98,6 +104,12 @@ else
         .led = gpio.num(25),
     };
 
+const Matrix = mx.Matrix(.{
+    .col_count = pins.cols.len,
+    .row_count = pins.rows.len,
+    .half = half,
+});
+
 const MATRIX = [_]ScanCode{
     // zig fmt: off
     .b,        .l,        .d,        .c,        .v,
@@ -114,44 +126,11 @@ const MATRIX = [_]ScanCode{
     // zig fmt: on
 };
 
-const row_count = pins.rows.len;
-const col_count = pins.cols.len;
-const matrix_half_s = row_count * col_count;
-const matrix_arr_half_len = (matrix_half_s + 7) / 8;
-const matrix_arr_len = matrix_arr_half_len * 2;
-
-inline fn getMatrixLeftHalf(matrix: *[matrix_arr_len]u8) *[matrix_arr_half_len]u8 {
-    return matrix[0..matrix_arr_half_len];
-}
-
-inline fn getMatrixRightHalf(matrix: *[matrix_arr_len]u8) *[matrix_arr_half_len]u8 {
-    return matrix[matrix_arr_half_len..];
-}
-
-inline fn getMatrixThisHalf(matrix: *[matrix_arr_len]u8) *[matrix_arr_half_len]u8 {
-    return if (config.half == .left) getMatrixLeftHalf(matrix) else getMatrixRightHalf(matrix);
-}
-
-inline fn getMatrixOppositeHalf(matrix: *[matrix_arr_len]u8) *[matrix_arr_half_len]u8 {
-    return if (config.half == .left) getMatrixRightHalf(matrix) else getMatrixLeftHalf(matrix);
-}
-
-inline fn setMatrixBit(matrix: *[matrix_arr_half_len]u8, bit_idx: u8, new_val: u1) void {
-    const idx = bit_idx >> 3;
-    const offset = bit_idx & 7;
-    const mask = @as(u8, 1) << @truncate(offset);
-    if (new_val == 1) {
-        matrix[idx] |= mask;
-    } else {
-        matrix[idx] &= ~mask;
-    }
-}
-
 var is_primary = false;
 
 const usart = PioUsart.init(.{
-    .rx_pin = if (config.half == .left) pins.serial.p0 else pins.serial.p1,
-    .tx_pin = if (config.half == .left) pins.serial.p1 else pins.serial.p0,
+    .rx_pin = if (half == .left) pins.serial.p0 else pins.serial.p1,
+    .tx_pin = if (half == .left) pins.serial.p1 else pins.serial.p0,
 });
 
 fn usartRxIrq() callconv(.c) void {
@@ -178,7 +157,7 @@ var tx_state: UsartTxState = .header;
 var is_secondary_ready = std.atomic.Value(bool).init(false);
 var scan_requested = std.atomic.Value(bool).init(false);
 
-var rx_frame: [matrix_arr_half_len]u8 = undefined;
+var rx_frame: Matrix.HalfState = undefined;
 var rx_frame_cursor: usize = 0;
 
 fn usartReceive() void {
@@ -212,7 +191,7 @@ fn usartReceive() void {
         .matrix_data => {
             rx_frame[rx_frame_cursor] = byte;
             rx_frame_cursor += 1;
-            if (rx_frame_cursor >= matrix_arr_half_len) {
+            if (rx_frame_cursor >= rx_frame.len) {
                 rx_frame_cursor = 0;
                 tx_state = .header;
             }
@@ -249,12 +228,9 @@ fn initUartLogger() void {
     hal.uart.init_logger(uart);
 }
 
-fn primaryMain(keyboard_hid: *KeyboardHid) void {
+fn primaryMain(keyboard_hid: *KeyboardHid) noreturn {
     var changed = false;
-    var matrix = [_]u8{0xff} ** matrix_arr_len;
-    var new_matrix = [_]u8{0xff} ** matrix_arr_len;
-    const new_matrix_this = getMatrixThisHalf(&new_matrix);
-    const new_matrix_opposite = getMatrixOppositeHalf(&new_matrix);
+    var matrix = Matrix{};
     while (true) {
         keyboard_hid.poll();
         if (changed) {
@@ -270,74 +246,71 @@ fn primaryMain(keyboard_hid: *KeyboardHid) void {
         }
 
         usartStartMessage(.scan_request);
-        scanMatrix(new_matrix_this);
+        scanMatrix(&matrix);
         // there might be partial updates, idk if thats gonna be a problem
-        @memcpy(new_matrix_opposite, &rx_frame);
-        changed = !std.mem.eql(u8, &new_matrix, &matrix);
-        matrix = new_matrix;
+        matrix.updateOppositeHalf(&rx_frame);
+        changed = matrix.commitUpdates();
     }
 }
 
-fn secondaryMain() void {
+fn secondaryMain() noreturn {
     usartStartMessage(.secondary_ready);
 
-    var matrix = [_]u8{0xff} ** matrix_arr_half_len;
+    var matrix = Matrix{};
     while (true) {
         asm volatile ("wfi");
         if (scan_requested.load(.acquire)) {
             scan_requested.store(false, .release);
             scanMatrix(&matrix);
+            _ = matrix.commitUpdates();
             usartStartMessage(.scan_result);
-            for (matrix) |byte| {
+            for (matrix.getThisHalf()) |byte| {
                 usart.write(byte);
             }
         }
     }
 }
 
-fn scanMatrix(matrix: *[matrix_arr_half_len]u8) void {
+inline fn scanMatrix(matrix: *Matrix) void {
     for (pins.rows, 0..) |row, row_idx| {
         row.put(0);
         time.sleep_us(2);
-        for (0..col_count) |col_idx| {
-            const col = if (config.half == .left)
+        for (0..pins.cols.len) |col_idx| {
+            const col = if (half == .left)
                 pins.cols[col_idx]
             else
-                pins.cols[col_count - col_idx - 1];
-            const bit_idx = row_idx * col_count + col_idx;
-            setMatrixBit(
-                matrix,
-                @truncate(bit_idx),
-                col.read(),
-            );
+                pins.cols[pins.cols.len - col_idx - 1];
+            const bit_idx = row_idx * pins.cols.len + col_idx;
+            matrix.updateKey(bit_idx, @enumFromInt(col.read()));
         }
         row.put(1);
     }
 }
 
-fn buildReport(matrix: *const [matrix_arr_len]u8) KeyboardHid.InReport {
+inline fn buildReport(matrix: *const Matrix) KeyboardHid.InReport {
     var report_keys = [_]ScanCode{.reserved} ** 6;
-    var report_idx: usize = 0;
-    var key_idx: usize = 0;
-    for (0..2) |half_idx| outer: {
-        for(0..matrix_arr_half_len) |byte_idx| {
-            const byte = matrix[half_idx * matrix_arr_half_len + byte_idx];
-            for (0..8) |bit_idx| {
-                const key_state = byte & (@as(u8, 1) << @truncate(bit_idx)) == 0;
-                if (key_state) {
-                    const keycode = MATRIX[key_idx];
-                    report_keys[report_idx] = keycode;
-                    report_idx += 1;
-                    if (report_idx >= report_keys.len) {
-                        break :outer;
-                    }
-                }
-                key_idx += 1;
-            }
-        }
-    }
+    populatePressedKeys(&report_keys, matrix);
     return .{
         .modifiers = .none,
         .keys = report_keys,
     };
+}
+
+inline fn populatePressedKeys(out: *[6]ScanCode, matrix: *const Matrix) void {
+    var report_idx: usize = 0;
+    var key_idx: usize = 0;
+    for (matrix.state) |byte| {
+        for (0..8) |bit_idx| {
+            const key_state = Matrix.getKeyState(byte, @truncate(bit_idx));
+            if (key_state == .pressed) {
+                const keycode = MATRIX[key_idx];
+                out[report_idx] = keycode;
+                report_idx += 1;
+                if (report_idx >= out.len) {
+                    return;
+                }
+            }
+            key_idx += 1;
+        }
+    }
 }

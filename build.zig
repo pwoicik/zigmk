@@ -16,20 +16,21 @@ const Half = enum {
 };
 
 pub fn build(b: *std.Build) !void {
-    const debug = b.option(
-        bool,
-        "debug",
-        "debug build",
-    ) orelse false;
     const board = b.option(
         Board,
         "board",
         "target board",
     ) orelse .pico2;
 
+    const optimize: std.builtin.OptimizeMode = switch (b.release_mode) {
+        .off, .any => .Debug,
+        .fast => .ReleaseFast,
+        .safe => .ReleaseSafe,
+        .small => .ReleaseSmall,
+    };
+
     const mz_dep = b.dependency("microzig", .{});
     const mb = MicroBuild.init(b, mz_dep) orelse return;
-    const optimize: std.builtin.OptimizeMode = if (debug) .Debug else .ReleaseSmall;
     try addHalf(b, mb, optimize, board, .right);
     try addHalf(b, mb, optimize, board, .left);
 }
