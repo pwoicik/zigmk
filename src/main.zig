@@ -73,13 +73,22 @@ const pins = if (buid_config.board == .pico2)
             gpio.num(8),
             gpio.num(9),
         },
-        .cols = .{
-            gpio.num(15),
-            gpio.num(11),
-            gpio.num(12),
-            gpio.num(13),
-            gpio.num(14),
-        },
+        .cols = if (half == .left)
+            .{
+                gpio.num(15),
+                gpio.num(11),
+                gpio.num(12),
+                gpio.num(13),
+                gpio.num(14),
+            }
+        else
+            .{
+                gpio.num(14),
+                gpio.num(13),
+                gpio.num(12),
+                gpio.num(11),
+                gpio.num(15),
+            },
         .serial = .{
             .p0 = gpio.num(16),
             .p1 = gpio.num(17),
@@ -94,13 +103,22 @@ else
             gpio.num(28),
             gpio.num(29),
         },
-        .cols = .{
-            gpio.num(6),
-            gpio.num(7),
-            gpio.num(3),
-            gpio.num(4),
-            gpio.num(2),
-        },
+        .cols = if (half == .left)
+            .{
+                gpio.num(6),
+                gpio.num(7),
+                gpio.num(3),
+                gpio.num(4),
+                gpio.num(2),
+            }
+        else
+            .{
+                gpio.num(2),
+                gpio.num(3),
+                gpio.num(4),
+                gpio.num(7),
+                gpio.num(6),
+            },
         .serial = .{
             .p0 = gpio.num(0),
             .p1 = gpio.num(1),
@@ -308,10 +326,7 @@ inline fn scanMatrix(matrix: *Matrix) void {
         row.put(0);
         time.sleep_us(2);
         for (0..pins.cols.len) |col_idx| {
-            const col = if (half == .left)
-                pins.cols[col_idx]
-            else
-                pins.cols[pins.cols.len - col_idx - 1];
+            const col = pins.cols[col_idx];
             const bit_idx = row_idx * pins.cols.len + col_idx;
             matrix.updateKey(bit_idx, @enumFromInt(col.read()));
         }
