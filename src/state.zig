@@ -25,6 +25,10 @@ pub const types = struct {
             .keys = [_]u8{@intFromEnum(kc.StandardKey.no)} ** 6,
             .mods = .none,
         };
+
+        inline fn rollover(self: *PressedKeys) void {
+            @memset(&self.keys, @intFromEnum(kc.HidCodes.error_roll_over));
+        }
     };
 
     pub fn Key(comptime CustomKey: type) type {
@@ -186,10 +190,10 @@ pub fn KeyboardState(comptime config: Config) type {
             return changed;
         }
 
-        // TODO: rollover handling
         inline fn scanPressedKeys(self: *const @This()) types.PressedKeys {
             var pressed_idx: usize = 0;
             var pressed_keys = types.PressedKeys.empty;
+            var rollover = false;
             const timestamp = timer.currentTime();
             for (self.key_states, 0..) |key, idx| {
                 if (key.is_pressed) {
@@ -198,9 +202,13 @@ pub fn KeyboardState(comptime config: Config) type {
                     switch (key_config) {
                         .press => |p| switch (p) {
                             .standard => |s| {
-                                if (s != .no and pressed_idx < pressed_keys.keys.len) {
-                                    pressed_keys.keys[pressed_idx] = @intFromEnum(s);
-                                    pressed_idx += 1;
+                                if (s != .no) {
+                                    if (pressed_idx < pressed_keys.keys.len) {
+                                        pressed_keys.keys[pressed_idx] = @intFromEnum(s);
+                                        pressed_idx += 1;
+                                    } else {
+                                        rollover = true;
+                                    }
                                 }
                             },
                             .custom => {
@@ -222,14 +230,21 @@ pub fn KeyboardState(comptime config: Config) type {
                                 }
                             } else {
                                 // TODO: this should execute if released before the timer elapses
-                                if (mt.key != .no and pressed_idx < pressed_keys.keys.len) {
-                                    pressed_keys.keys[pressed_idx] = @intFromEnum(mt.key);
-                                    pressed_idx += 1;
+                                if (mt.key != .no) {
+                                    if (pressed_idx < pressed_keys.keys.len) {
+                                        pressed_keys.keys[pressed_idx] = @intFromEnum(mt.key);
+                                        pressed_idx += 1;
+                                    } else {
+                                        rollover = true;
+                                    }
                                 }
                             }
                         },
                     }
                 }
+            }
+            if (rollover) {
+                pressed_keys.rollover();
             }
             return pressed_keys;
         }
