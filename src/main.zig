@@ -17,6 +17,11 @@ const half: Half = switch (buid_config.half) {
 
 pub const panic = microzig.panic;
 pub const std_options = microzig.std_options(.{
+    .log_scope_levels = &.{
+        .{ .scope = .usb_dev, .level = .warn },
+        .{ .scope = .usb_ctrl, .level = .warn },
+        .{ .scope = .usb_hid_int_driver, .level = .warn },
+    },
     .logFn = hal.uart.log,
 });
 pub const microzig_options: microzig.Options = .{
