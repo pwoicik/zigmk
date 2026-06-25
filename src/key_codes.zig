@@ -13,6 +13,15 @@ pub const ModKey = enum(u8) {
     rshift = 0xe5,
     ralt = 0xe6,
     rgui = 0xe7,
+
+    pub const lc: ModKey = .lctrl;
+    pub const ls: ModKey = .lshift;
+    pub const la: ModKey = .lalt;
+    pub const lg: ModKey = .lgui;
+    pub const rc: ModKey = .rctrl;
+    pub const rs: ModKey = .rshift;
+    pub const ra: ModKey = .ralt;
+    pub const rg: ModKey = .rgui;
 };
 
 pub const StandardKey = enum(u8) {
@@ -208,4 +217,7 @@ pub const StandardKey = enum(u8) {
     assistant = 0xc0,
     mission_control = 0xc1,
     launchpad = 0xc2,
+
+    pub const esc: StandardKey = .escape;
+    pub const ent: StandardKey = .enter;
 };
