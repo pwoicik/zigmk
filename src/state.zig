@@ -86,7 +86,9 @@ pub const types = struct {
 
     fn KeyState(comptime Layer: type) type {
         return packed struct(u64) {
+            /// time at which the key was last pressed
             timestamp: u32,
+            /// the highest layer that was active when the key was last pressed
             layer: @typeInfo(Layer).@"enum".tag_type,
             is_pressed: bool,
             __padding: @Type(.{
@@ -151,36 +153,71 @@ pub fn KeyboardState(comptime config: Config) type {
             return self;
         }
 
-        pub inline fn update(self: *@This(), matrix: *const config.Matrix) bool {
-            self.updateKeyStates(matrix);
-            return self.updatePressedKeys();
-        }
-
-        inline fn updateKeyStates(self: *@This(), matrix: *const config.Matrix) void {
-            const timestamp = timer.currentTime();
+        pub fn update(self: *@This(), matrix: *const config.Matrix) bool {
+            const timestamp = timer.currentTimeMs();
             const active_layer = self.getHighestAciveLayer();
+
+            var pressed_keys = types.PressedKeys.empty;
+            var pressed_idx: usize = 0;
+
             var key_idx: usize = 0;
             for (matrix.state) |byte| {
                 for (0..8) |bit_idx| {
                     defer key_idx += 1;
-                    const was_pressed = self.key_states[key_idx].is_pressed;
+
+                    const key = &self.key_states[key_idx];
+                    const was_pressed = key.is_pressed;
                     const is_pressed = config.Matrix.getKeyState(byte, @truncate(bit_idx)) == .pressed;
-                    if (is_pressed != was_pressed) {
-                        self.key_states[key_idx] = if (is_pressed)
-                            .{
-                                .is_pressed = true,
-                                .timestamp = timestamp,
-                                .layer = @intFromEnum(active_layer),
+                    key.is_pressed = is_pressed;
+                    if (is_pressed and !was_pressed) {
+                        key.timestamp = timestamp;
+                        key.layer = @intFromEnum(active_layer);
+                    }
+
+                    const keymap = self.getKeymap(@enumFromInt(key.layer));
+                    const key_config = keymap[key_idx];
+
+                    switch (key_config) {
+                        .press => |p| switch (p) {
+                            .standard => |s| {
+                                if (is_pressed and s != .no) {
+                                    addPressedKey(&pressed_keys, &pressed_idx, s);
+                                } else {
+                                    self.key_states[key_idx].is_pressed = false;
+                                }
+                            },
+                            .custom => {
+                                unreachable;
+                            },
+                        },
+                        .mod_tap => |mt| {
+                            const elapsed_time = timestamp - key.timestamp;
+                            if (is_pressed) {
+                                if (elapsed_time >= tap_term) {
+                                    switch (mt.mod) {
+                                        .lctrl => pressed_keys.mods.lctrl = true,
+                                        .lshift => pressed_keys.mods.lshift = true,
+                                        .lalt => pressed_keys.mods.lalt = true,
+                                        .lgui => pressed_keys.mods.lgui = true,
+                                        .rctrl => pressed_keys.mods.rctrl = true,
+                                        .rshift => pressed_keys.mods.rshift = true,
+                                        .ralt => pressed_keys.mods.ralt = true,
+                                        .rgui => pressed_keys.mods.rgui = true,
+                                    }
+                                }
+                            } else {
+                                if (mt.key != .no and elapsed_time < tap_term + 1) {
+                                    addPressedKey(&pressed_keys, &pressed_idx, mt.key);
+                                }
                             }
-                        else
-                            .empty;
+                        },
                     }
                 }
             }
-        }
 
-        inline fn updatePressedKeys(self: *@This()) bool {
-            const pressed_keys = self.scanPressedKeys();
+            if (pressed_idx > pressed_keys.keys.len) {
+                pressed_keys.rollover();
+            }
             const changed = !std.mem.eql(
                 u8,
                 std.mem.asBytes(&pressed_keys),
@@ -190,68 +227,16 @@ pub fn KeyboardState(comptime config: Config) type {
             return changed;
         }
 
-        inline fn scanPressedKeys(self: *const @This()) types.PressedKeys {
-            var pressed_idx: usize = 0;
-            var pressed_keys = types.PressedKeys.empty;
-            var rollover = false;
-            const timestamp = timer.currentTime();
-            for (self.key_states, 0..) |key, idx| {
-                if (key.is_pressed) {
-                    const keymap = self.getKeymap(@enumFromInt(key.layer));
-                    const key_config = keymap[idx];
-                    switch (key_config) {
-                        .press => |p| switch (p) {
-                            .standard => |s| {
-                                if (s != .no) {
-                                    if (pressed_idx < pressed_keys.keys.len) {
-                                        pressed_keys.keys[pressed_idx] = @intFromEnum(s);
-                                        pressed_idx += 1;
-                                    } else {
-                                        rollover = true;
-                                    }
-                                }
-                            },
-                            .custom => {
-                                unreachable;
-                            },
-                        },
-                        .mod_tap => |mt| {
-                            const time_elapsed = key.timestamp + tap_term >= timestamp;
-                            if (time_elapsed) {
-                                switch (mt.mod) {
-                                    .lctrl => pressed_keys.mods.lctrl = true,
-                                    .lshift => pressed_keys.mods.lshift = true,
-                                    .lalt => pressed_keys.mods.lalt = true,
-                                    .lgui => pressed_keys.mods.lgui = true,
-                                    .rctrl => pressed_keys.mods.rctrl = true,
-                                    .rshift => pressed_keys.mods.rshift = true,
-                                    .ralt => pressed_keys.mods.ralt = true,
-                                    .rgui => pressed_keys.mods.rgui = true,
-                                }
-                            } else {
-                                // TODO: this should execute if released before the timer elapses
-                                if (mt.key != .no) {
-                                    if (pressed_idx < pressed_keys.keys.len) {
-                                        pressed_keys.keys[pressed_idx] = @intFromEnum(mt.key);
-                                        pressed_idx += 1;
-                                    } else {
-                                        rollover = true;
-                                    }
-                                }
-                            }
-                        },
-                    }
-                }
-            }
-            if (rollover) {
-                pressed_keys.rollover();
-            }
-            return pressed_keys;
-        }
-
         inline fn getKeymap(self: *const @This(), layer: Layer) Keymap {
             const ptr: [*]const Keymap = @ptrCast(&self.layers);
             return ptr[@intFromEnum(layer)];
+        }
+
+        inline fn addPressedKey(pressed_keys: *types.PressedKeys, idx: *usize, key: anytype) void {
+            if (idx.* < pressed_keys.keys.len) {
+                pressed_keys.keys[idx.*] = @intFromEnum(key);
+            }
+            idx.* += 1;
         }
 
         pub fn getHighestAciveLayer(self: *const @This()) Layer {

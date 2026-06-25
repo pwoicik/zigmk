@@ -232,15 +232,15 @@ fn keymap(comptime km: [38]KeyConfig) [KeyboardState.keymap_size]KeyConfig {
     return .{
         // zig fmt: off
         km[0],  km[1],  km[2],  km[3],  km[4],
-        km[6],  km[7],  km[8],  km[9],  km[10],
+        km[5],  km[6],  km[7],  km[8],  km[9],
         km[11], km[12], km[13], km[14], km[15],
-        km[5],  .no,    km[16], km[17], km[18],
+        km[10], .no,    km[16], km[17], km[18],
         .no,    .no,    .no,    .no,
 
         km[19], km[20], km[21], km[22], km[23],
         km[24], km[25], km[26], km[27], km[28],
         km[29], km[30], km[31], km[32], km[33],
-        km[34], km[35], km[36], .no,    km[37],
+        km[35], km[36], km[37], .no,    km[34],
         .no,    .no,    .no,    .no,
         // zig fmt: on
     };
@@ -248,17 +248,17 @@ fn keymap(comptime km: [38]KeyConfig) [KeyboardState.keymap_size]KeyConfig {
 
 // zig fmt: off
 const default_keymap = keymap(.{
-    // left ------------------------------------------------------------------------------------------
-                  .ps(.b),      .ps(.l),      .ps(.d),      .ps(.c),      .ps(.v),
-    .ps(.escape), .ps(.n),      .ps(.z),      .ps(.t),      .ps(.s),      .ps(.g),
-                  .ps(.x),      .ps(.q),      .ps(.m),      .ps(.w),      .no,
-                                                            .no,          .ps(.space),  .ps(.delete),
+    // left --------------------------------------------------------------------------------------------
+               .ps(.b),      .ps(.l),      .ps(.d),      .ps(.c),      .ps(.v),
+               .mt(.lc, .n), .mt(.ls, .z), .mt(.lg, .t), .mt(.la, .s), .ps(.g),
+    .ps(.esc), .ps(.x),      .ps(.q),      .ps(.m),      .ps(.w),      .no,
+                                                         .no,  .        ps(.space), .ps(.delete),
 
-    // right -----------------------------------------------------------------------------------------
-                  .ps(.j),      .ps(.f),      .ps(.o),      .ps(.u),      .ps(.@";"),
-                  .ps(.y),      .ps(.h),      .ps(.a),      .ps(.e),      .ps(.i),
-                  .ps(.k),      .ps(.p),      .ps(.@","),   .ps(.@"."),   .ps(.@"/"),
-    .ps(.enter),  .ps(.r),      .no,                                                    .no,
+    // right -------------------------------------------------------------------------------------------
+               .ps(.j), .ps(.f),      .ps(.o),      .ps(.u),      .ps(.@";"),
+               .ps(.y), .mt(.la, .h), .mt(.lg, .a), .mt(.ls, .e), .mt(.lc, .i),
+               .ps(.k), .ps(.p),      .ps(.@","),   .ps(.@"."),   .ps(.@"/"),   .ps(.@"\\"),
+    .ps(.ent), .ps(.r), .no,
 });
 // zig fmt: on
 

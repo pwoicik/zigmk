@@ -2,7 +2,7 @@ const builtin = @import("builtin");
 
 pub var __time: u32 = 0;
 
-pub fn currentTime() u32 {
+pub fn currentTimeMs() u32 {
     if (builtin.is_test) {
         return __time;
     } else {
