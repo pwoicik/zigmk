@@ -277,7 +277,6 @@ fn primaryMain(keyboard_hid: *KeyboardHid) noreturn {
         scanMatrix(&matrix);
         // there might be partial updates, idk if thats gonna be a problem
         matrix.updateOppositeHalf(&rx_frame);
-        matrix.commitUpdates();
         keys_changed = state.update(&matrix);
     }
 }
@@ -291,7 +290,6 @@ fn secondaryMain() noreturn {
         if (scan_requested.load(.acquire)) {
             scan_requested.store(false, .release);
             scanMatrix(&matrix);
-            _ = matrix.commitUpdates();
             usartStartMessage(.scan_result);
             for (matrix.getThisHalf()) |byte| {
                 usart.write(byte);

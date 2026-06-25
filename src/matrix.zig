@@ -24,18 +24,13 @@ pub fn Matrix(comptime config: Config) type {
         pub const State = [state_len]u8;
 
         state: State = [_]u8{0xff} ** state_len,
-        new_state: State = [_]u8{0xff} ** state_len,
 
         pub inline fn updateKey(self: *@This(), idx: usize, value: KeyState) void {
-            setBit(getThisHalfOf(&self.new_state), idx, value);
+            setBit(getThisHalfOf(&self.state), idx, value);
         }
 
         pub inline fn updateOppositeHalf(self: *@This(), value: *const HalfState) void {
-            @memcpy(getOppositeHalfOf(&self.new_state), value);
-        }
-
-        pub inline fn commitUpdates(self: *@This()) void {
-            self.state = self.new_state;
+            @memcpy(getOppositeHalfOf(&self.state), value);
         }
 
         pub inline fn getKeyState(byte: u8, idx: u3) KeyState {
