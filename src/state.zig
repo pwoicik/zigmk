@@ -31,17 +31,23 @@ pub const types = struct {
         }
     };
 
-    pub fn Key(comptime CustomKey: type) type {
+    fn Key(comptime CustomKey: type) type {
         return union(enum) {
             standard: kc.StandardKey,
             custom: CustomKey,
         };
     }
 
-    pub fn KeyConfig(comptime TKey: type) type {
+    pub fn KeyConfig(comptime config: Config) type {
         return union(enum) {
-            press: TKey,
-            mod_tap: struct { mod: kc.ModKey, key: kc.StandardKey },
+            const _Key = Key(config.CustomKey);
+
+            press: _Key,
+            mod_tap: struct {
+                mod: kc.ModKey,
+                key: kc.StandardKey,
+                tap_term: u16 = config.tap_term,
+            },
 
             pub const no: @This() = .{ .press = .{ .standard = .no } };
 
@@ -49,7 +55,7 @@ pub const types = struct {
                 return .{ .press = .{ .standard = key } };
             }
 
-            pub fn pc(comptime key: @typeInfo(TKey).@"union".fields[1].type) @This() {
+            pub fn pc(comptime key: @typeInfo(_Key).@"union".fields[1].type) @This() {
                 return .{ .press = .{ .custom = key } };
             }
 
@@ -121,11 +127,11 @@ pub fn KeyboardState(comptime config: Config) type {
     }
 
     return struct {
-        pub const tap_term = config.tap_term;
+        const poll_interval_ms = 1;
         pub const keymap_size = @typeInfo(config.Matrix.State).array.len * 8;
 
-        const Key = types.Key(config.CustomKey);
-        pub const KeyConfig = types.KeyConfig(Key);
+        pub const KeyConfig = types.KeyConfig(config);
+        const Key = KeyConfig._Key;
         pub const Keymap = [keymap_size]KeyConfig;
 
         const Layer = config.Layer;
@@ -193,7 +199,7 @@ pub fn KeyboardState(comptime config: Config) type {
                         .mod_tap => |mt| {
                             const elapsed_time = timestamp - key.timestamp;
                             if (is_pressed) {
-                                if (elapsed_time >= tap_term) {
+                                if (elapsed_time >= mt.tap_term) {
                                     switch (mt.mod) {
                                         .lctrl => pressed_keys.mods.lctrl = true,
                                         .lshift => pressed_keys.mods.lshift = true,
@@ -206,7 +212,7 @@ pub fn KeyboardState(comptime config: Config) type {
                                     }
                                 }
                             } else {
-                                if (mt.key != .no and elapsed_time < tap_term + 1) {
+                                if (mt.key != .no and elapsed_time < mt.tap_term + poll_interval_ms) {
                                     addPressedKey(&pressed_keys, &pressed_idx, mt.key);
                                 }
                             }
